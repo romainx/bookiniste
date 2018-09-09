@@ -8,7 +8,10 @@ from bs4 import BeautifulSoup
 from colorama import init 
 from termcolor import colored 
 from tqdm import tqdm
+import logging
 
+logger = logging.getLogger(__name__)
+logger.setLevel(logging.INFO)
 
 class Util:
 
@@ -28,25 +31,37 @@ class Price():
     
     @staticmethod
     def _convert(price):
-        return int(price) / 100
+        converted = None
+        if price:
+            converted = int(price) / 100
+        return converted
     
     @staticmethod
-    def _format_number(price, color, symbol='€'):
-        return colored('{:<5}'.format(str(round(price,1)) + symbol), color)
+    def _format_number(price, color, symbol='€', sign=''):
+        price = '{price:{sign:}.1f}'.format(price = price, 
+                                            sign = sign)
+        return colored('{:<6}'.format(str(price) + symbol), color)
 
     def __repr__(self):
         # Le Traquet kurde, Jean Rolin.
         deal = self.deal()
-        return '{target: <7} -> {min: <6} / {new: <6} ({diff: <6} / {percent: <5})'.format(
+        return '{target: <5}-> {min: <6}/ {new: <6} ({diff: <6})'.format(
             min = Price._format_number(self.min, deal),
             new = Price._format_number(self.new, 'white'),
             target = Price._format_number(self.target, 'cyan'),
-            diff = Price._format_number(self.diff, deal),
-            percent = Price._format_number(self.percentage, deal, '%'),
+            diff = Price._format_number(price = self.diff, color = deal, sign = '+')
             )
     @property
     def min(self):
-        return min(self.new, self.used)
+        m = None
+        if self.new is None:
+            m = self.used
+        if self.used is None:
+            m = self.new
+        if self.new and self.used:
+            m = min(self.new, self.used)
+        return m
+
     @property
     def diff(self):
         return self.min - self.target
@@ -108,7 +123,6 @@ class Bookiniste():
         self.aws = data['aws']
         self.whislist = data['whislist']
         return self.aws, self.whislist
-        
 
     def check_deals(self):
         for item in tqdm(self.whislist, unit='req.'):
@@ -117,10 +131,20 @@ class Bookiniste():
                                        self.aws['AWS_SECRET_ACCESS_KEY'], 
                                        self.aws['AWS_ASSOCIATE_TAG'], 
                                        Region='FR', MaxQPS=0.9, Parser=lambda text: BeautifulSoup(text, 'xml'))
+            # Running the query
             r = amazon.ItemLookup(**self.params)
+            # Retrieving prices
+            lowest_new_price = None
+            lowest_used_price = None
+            try:
+                 lowest_new_price = Util.extract_text(r.ItemLookupResponse.Items.Item.OfferSummary.LowestNewPrice.Amount)
+                 lowest_used_price = Util.extract_text(r.ItemLookupResponse.Items.Item.OfferSummary.LowestUsedPrice.Amount)
+            except:
+                logger.warn('Cannnot retrieve price for {}'.format(self.params['ItemId']))
+            
             price = Price(target = item['target'],
-                      lowest_new_price = Util.extract_text(r.ItemLookupResponse.Items.Item.OfferSummary.LowestNewPrice.Amount),
-                      lowest_used_price = Util.extract_text(r.ItemLookupResponse.Items.Item.OfferSummary.LowestUsedPrice.Amount))
+                      lowest_new_price = lowest_new_price,
+                      lowest_used_price = lowest_used_price)
             book = Book(title = Util.extract_text(r.ItemLookupResponse.Items.Item.ItemAttributes.Title),
                      author = Util.extract_text(r.ItemLookupResponse.Items.Item.ItemAttributes.Author),
                      price = price
@@ -132,7 +156,7 @@ class Bookiniste():
 
     def deals(self):
         self.books = self.check_deals()
-        for book in sorted(self.books, key=lambda book: book.price.percentage):
+        for book in sorted(self.books, key=lambda book: book.price.diff):
             print('- {book}'.format(book = book))
 
 if __name__ == '__main__':
