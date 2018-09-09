@@ -1,0 +1,6 @@
+tqdm
+termcolor
+colorama
+beautifulsoup4
+fire
+bottlenose
