@@ -5,13 +5,15 @@ import json
 import bottlenose
 import fire
 from bs4 import BeautifulSoup
-from colorama import init 
-from termcolor import colored 
+from colorama import init
+from termcolor import colored
 from tqdm import tqdm
 import logging
+from retrying import retry
 
 logger = logging.getLogger(__name__)
-logger.setLevel(logging.INFO)
+logger.setLevel(logging.ERROR)
+
 
 class Util:
 
@@ -22,35 +24,49 @@ class Util:
             value = bs4_element.text
         return value
 
+
 class Price():
-    
+
     def __init__(self, target, lowest_new_price, lowest_used_price):
         self.target = target
         self.new = Price._convert(lowest_new_price)
         self.used = Price._convert(lowest_used_price)
-    
+
     @staticmethod
     def _convert(price):
         converted = None
         if price:
             converted = int(price) / 100
         return converted
-    
+
     @staticmethod
     def _format_number(price, color, symbol='€', sign=''):
-        price = '{price:{sign:}.1f}'.format(price = price, 
-                                            sign = sign)
+        price = '{price:{sign:}.1f}'.format(price=price,
+                                            sign=sign)
         return colored('{:<6}'.format(str(price) + symbol), color)
 
     def __repr__(self):
         # Le Traquet kurde, Jean Rolin.
         deal = self.deal()
-        return '{target: <5}-> {min: <6}/ {new: <6} ({diff: <6})'.format(
-            min = Price._format_number(self.min, deal),
-            new = Price._format_number(self.new, 'white'),
-            target = Price._format_number(self.target, 'cyan'),
-            diff = Price._format_number(price = self.diff, color = deal, sign = '+')
+        rpr = ''
+        if self.new != self.min:
+            rpr = '{target: <5}-> {min: <5}/ {new: <5} ({diff: <6})'.format(
+                min=Price._format_number(self.min, deal),
+                new=Price._format_number(self.new, 'white'),
+                target=Price._format_number(self.target, 'cyan'),
+                diff=Price._format_number(
+                    price=self.diff, color=deal, sign='+')
             )
+        else:
+            # There is no need to display the same price twice
+            rpr = '{target: <5}-> {min: <23} ({diff: <6})'.format(
+                min=Price._format_number(self.min, deal),
+                target=Price._format_number(self.target, 'cyan'),
+                diff=Price._format_number(
+                    price=self.diff, color=deal, sign='+')
+            )
+        return rpr
+
     @property
     def min(self):
         m = None
@@ -65,11 +81,11 @@ class Price():
     @property
     def diff(self):
         return self.min - self.target
-    
+
     @property
     def percentage(self):
         return self.diff / self.target * 100
-        
+
     def deal(self):
         deal = 'red'
         if self.diff <= 3:
@@ -77,7 +93,7 @@ class Price():
         elif self.diff <= 5:
             deal = 'yellow'
         return deal
-    
+
 
 class Book():
     """A book as I manage it"""
@@ -92,12 +108,13 @@ class Book():
     def __repr__(self):
         # Le Traquet kurde, Jean Rolin.
         return '{title:<27}: {price}'.format(
-            title = (self.title[:Book.TITLE_MAX_LEN] + '..') if len(self.title) > Book.TITLE_MAX_LEN else self.title,
-            price = self.price)
+            title=(self.title[:Book.TITLE_MAX_LEN] +
+                   '..') if len(self.title) > Book.TITLE_MAX_LEN else self.title,
+            price=self.price)
 
 
 class Bookiniste():
-    
+
     def __init__(self):
         # AWS params
         self.aws = None
@@ -108,16 +125,14 @@ class Bookiniste():
         # Params used to perform the call to the AWS libs
         self.params = {
             'ItemId': None,
-            'IdType': 'ISBN',
+            'IdType': 'ASIN',
             'ResponseGroup': 'ItemAttributes,OfferSummary',
-            'SearchIndex': 'Books'
-            }
+        }
         self.aws, self.whislist = self._load_data()
-
 
     def _load_data(self):
         # Parse JSON into an object with attributes corresponding to dict keys.
-        path = os.path.join(os.path.expanduser('~'),'Dropbox/bookiniste.json')
+        path = os.path.join(os.path.expanduser('~'), 'Dropbox/bookiniste.json')
         with open(path) as f:
             data = json.load(f)
         self.aws = data['aws']
@@ -126,38 +141,52 @@ class Bookiniste():
 
     def check_deals(self):
         for item in tqdm(self.whislist, unit='req.'):
-            self.params['ItemId'] = item['ISBN'].replace('-', '')
-            amazon = bottlenose.Amazon(self.aws['AWS_ACCESS_KEY_ID'], 
-                                       self.aws['AWS_SECRET_ACCESS_KEY'], 
-                                       self.aws['AWS_ASSOCIATE_TAG'], 
-                                       Region='FR', MaxQPS=0.9, Parser=lambda text: BeautifulSoup(text, 'xml'))
+            self.params['ItemId'] = item['ASIN'].replace('-', '')
+            amazon = bottlenose.Amazon(self.aws['AWS_ACCESS_KEY_ID'],
+                                       self.aws['AWS_SECRET_ACCESS_KEY'],
+                                       self.aws['AWS_ASSOCIATE_TAG'],
+                                       Region='FR', MaxQPS=0.5, Parser=lambda text: BeautifulSoup(text, 'xml'))
             # Running the query
-            r = amazon.ItemLookup(**self.params)
+            r = Bookiniste._call_api(amazon, self.params)
             # Retrieving prices
             lowest_new_price = None
             lowest_used_price = None
             try:
-                 lowest_new_price = Util.extract_text(r.ItemLookupResponse.Items.Item.OfferSummary.LowestNewPrice.Amount)
-                 lowest_used_price = Util.extract_text(r.ItemLookupResponse.Items.Item.OfferSummary.LowestUsedPrice.Amount)
+                lowest_new_price = Util.extract_text(
+                    r.ItemLookupResponse.Items.Item.OfferSummary.LowestNewPrice.Amount)
+                lowest_used_price = Util.extract_text(
+                    r.ItemLookupResponse.Items.Item.OfferSummary.LowestUsedPrice.Amount)
             except:
-                logger.warn('Cannnot retrieve price for {}'.format(self.params['ItemId']))
-            
-            price = Price(target = item['target'],
-                      lowest_new_price = lowest_new_price,
-                      lowest_used_price = lowest_used_price)
-            book = Book(title = Util.extract_text(r.ItemLookupResponse.Items.Item.ItemAttributes.Title),
-                     author = Util.extract_text(r.ItemLookupResponse.Items.Item.ItemAttributes.Author),
-                     price = price
-                    )
-            # <ItemAttributes>.Binding
-            #tqdm.write('{} done'.format(book.title))
+                logger.warn('Cannnot retrieve price for {}'.format(
+                    self.params['ItemId']))
+
+            price = Price(target=item['target'],
+                          lowest_new_price=lowest_new_price,
+                          lowest_used_price=lowest_used_price)
+            book = Book(title=Util.extract_text(r.ItemLookupResponse.Items.Item.ItemAttributes.Title),
+                        author=Util.extract_text(
+                            r.ItemLookupResponse.Items.Item.ItemAttributes.Author),
+                        price=price
+                        )
+
             self.books.append(book)
         return self.books
+
+    # Retry function in case of exception: https://julien.danjou.info/python-retrying/
+    @staticmethod
+    @retry(wait_exponential_multiplier=1000, wait_exponential_max=3000, stop_max_delay=6000)
+    def _call_api(amazon, params):
+        """ Call the amazon API to lookup for an item
+        The call is using a retry to avoid 503 errors. 
+        The method used is exponential backoff
+        """
+        return amazon.ItemLookup(**params)
 
     def deals(self):
         self.books = self.check_deals()
         for book in sorted(self.books, key=lambda book: book.price.diff):
-            print('- {book}'.format(book = book))
+            print('- {book}'.format(book=book))
+
 
 if __name__ == '__main__':
-      fire.Fire(Bookiniste)
+    fire.Fire(Bookiniste)
