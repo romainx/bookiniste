@@ -140,12 +140,14 @@ class Bookiniste():
         return self.aws, self.whislist
 
     def check_deals(self):
+
+        amazon = bottlenose.Amazon(self.aws['AWS_ACCESS_KEY_ID'],
+                                    self.aws['AWS_SECRET_ACCESS_KEY'],
+                                    self.aws['AWS_ASSOCIATE_TAG'],
+                                    Region='FR', MaxQPS=0.9, Parser=lambda text: BeautifulSoup(text, 'xml'))
+
         for item in tqdm(self.whislist, unit='req.'):
             self.params['ItemId'] = item['ASIN'].replace('-', '')
-            amazon = bottlenose.Amazon(self.aws['AWS_ACCESS_KEY_ID'],
-                                       self.aws['AWS_SECRET_ACCESS_KEY'],
-                                       self.aws['AWS_ASSOCIATE_TAG'],
-                                       Region='FR', MaxQPS=0.5, Parser=lambda text: BeautifulSoup(text, 'xml'))
             # Running the query
             r = Bookiniste._call_api(amazon, self.params)
             # Retrieving prices
